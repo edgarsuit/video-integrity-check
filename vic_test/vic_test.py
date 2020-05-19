@@ -218,18 +218,16 @@ def check_vid(video):
 	execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
 
-	run_hash = True
-	if len(vid_data) == 1:
-		if mod_time == vid_data[0][3] and file_size == vid_data[0][4]:
-			run_hash = False
-
 	# If --skip-hash-check was passed, we assume the hash we have on-file in the database is correct if and only if
 	# there is only one hash for that file. If there is only a single hash in the database for that file, we load that
 	# hash digest into the digest variable and set a flag to skip the hash computation below.
 	run_hash = True
-	if skip_hash_check and len(vid_data) == 1:
-		digest = vid_data[0][1]
-		run_hash = False
+	if len(vid_data) == 1:
+		if mod_time == vid_data[0][3] and file_size == vid_data[0][4]:
+			digest = vid_data[0][1]
+			digest_time = vid_data[0][2]
+			run_hash = False
+
 
 	# Hash computation will be run if 1) --skip-hash-check was NOT passed, or 2) --skip-hash-check was passed but the
 	# video file either has 2+ entries in the database (multiple file versions) or has 0 entries in the database (file
@@ -273,7 +271,7 @@ def check_vid(video):
 
 	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not, 
 	# we need to run ffmpeg and add results of run to database.
-	q = "SELECT full_path, digest, pass, err_text, collision_videos FROM vic WHERE digest = \"" + digest + "\""
+	q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
 	execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
 
@@ -282,11 +280,7 @@ def check_vid(video):
 	for vid in vid_data:
 		if vid[0] != video and vid[1] == digest:
 			# Save the name of the video and the list of collision videos for that row for later comparison
-			rows_with_collisions.append([vid[0],vid[4]])
-			# Save the pass value and the ffmpeg output from the database (this will be the same for all files with the
-			# same hash value, so we don't need to store every copy of it)
-			collision_pass = vid[2]
-			collision_err_text = vid[3]
+			rows_with_collisions.append([vid[0],vid[2]])
 
 	# Save the number of collisions found. If it's not zero, we need to do collision processing
 	collisions = len(rows_with_collisions)
@@ -341,7 +335,7 @@ def check_vid(video):
 			ffmpeg_output = "PYTHON ERROR"
 		
 		# If ffmpeg_output is not empty, we got some coding error and the video did not pass the test
-		vid_pass = 0 if ffmpeg_output != "" else 1
+		err = 1 if ffmpeg_output != "" else 0
 
 		# If there is an ffmpeg error, check if it's a non monotonically increasing dts error and clean up output if it
 		# is. This output can be repeated 10,000+ times on some videos.
@@ -354,26 +348,13 @@ def check_vid(video):
 		# db.execute call for "INSERT" and "DELETE" operations. Since this is multi-threaded program, the DB can 
 		# occasionally be locked by another process when we attempt to read from it or write to it. If that happens,
 		# we sleep for 1 second and try the operation again. This is used anywhere a db operation occurs in parallel.
-		db_ok = False
-		while not db_ok:
-			try:
-				# Write all the test data to the database, including full video file path, the SHA1 digest, a boolean
-				# value that indicates if the test passed, and the output of the ffmpeg run (which will only contain
-				# text if we encountered a coding error, otherwise it will be an empty string).
-				my_db.execute("INSERT INTO vic VALUES(?,?,?,?,?,?)",
-					(video,digest,vid_pass,ffmpeg_output,collisions,collision_videos))
-				db_ok = True
-			except:
-				print("ERROR SECT 6 IN PID " + str(pid))
-				time.sleep(1)
-		db_ok = False
-		while not db_ok:
-			try:
-				vic_db.commit()
-				db_ok = True
-			except:
-				print("ERROR SECT 7 IN PID " + str(pid))
-				time.sleep(1)
+		#
+		# Write all the test data to the database, including full video file path, the SHA1 digest, a boolean
+		# value that indicates if the test passed, and the output of the ffmpeg run (which will only contain
+		# text if we encountered a coding error, otherwise it will be an empty string).
+		q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?)",
+			(video,digest,digest_time,mod_time,file_size,err,ffmpeg_output,collisions,collision_videos))
+		execute_sql(my_db,q,True)
 
 		# Output status of check
 		stop = time.perf_counter()
