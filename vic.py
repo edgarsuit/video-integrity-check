@@ -216,10 +216,12 @@ def check_vid(video):
 	if run_hash:
 		# Hash the video file with get_sha1() and print status
 		start = time.perf_counter()
+		digest_time = None
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
 			+ str(tot_file_count) + " ] " + vid_name + " hashing... ")
 		try:
 			digest = get_sha1(video)
+			digest_time = time.time()
 		except:
 			digest = "Error"
 		stop = time.perf_counter()
