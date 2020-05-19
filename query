@@ -1,0 +1,40 @@
+stop stop stop
+
+PRAGMA foreign_leys=OFF;
+
+BEGIN TRANSACTION;
+ALTER TABLE vic RENAME TO vic_old;
+
+CREATE TABLE vic (
+	full_path text,
+	digest text,
+	pass int,
+	err_text text,
+	collisions int,
+	collision_videos text
+);
+
+DROP INDEX idx_full_path;
+DROP INDEX idx_digest;
+CREATE INDEX idx_full_path ON vic(full_path);
+CREATE INDEX idx_digest ON vic(digest);
+CREATE INDEX idx_pass ON vic(pass);
+CREATE INDEX idx_collisions ON vic(collisions);
+
+INSERT INTO vic (full_path,digest,pass,err_text,collisions,collision_videos)
+	SELECT
+		full_path,
+		digest,
+		CASE
+			WHEN err_text IS NULL OR err_text = ''
+				THEN 1
+			ELSE 0
+		END pass,
+		err_text,
+		"" as collisions,
+		"" as collision_videos
+	FROM vic_old;
+
+DROP TABLE vic_old;
+
+COMMIT;
