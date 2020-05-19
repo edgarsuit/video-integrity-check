@@ -168,6 +168,25 @@ def kill_vic(signum, frame):
 	subprocess.run(shlex.split("stty sane"))
 	sys.exit(0)
 
+def execute_sql(cursor,q,commit=False):
+	global vic_db
+	db_ok = False
+	while not db_ok:
+		try:
+			cursor.execute(q)
+			db_ok = True
+		except:
+			time.sleep(1)
+
+	if commit:
+		db_ok = False
+		while not db_ok:
+			try:
+				vic_db.commit()
+				db_ok = True
+			except:
+				time.sleep(1)
+
 # Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for 
 # future reference. All output from ffmpeg is stored in database file along with the file's full path, its SHA1 hash,
 # if it passed the ffmpeg test, and the output from that test
@@ -181,7 +200,8 @@ def check_vid(video):
 	pid = psutil.Process(os.getpid())
 
 	# Regex statement to clean up DTS error spam
-	dts_re = re.compile(r"^.*\b(Application provided invalid, non monotonically increasing dts to muxer)\b.*$\n",re.MULTILINE)
+	dts_re = re.compile(
+		r"^.*\b(Application provided invalid, non monotonically increasing dts to muxer)\b.*$\n",re.MULTILINE)
 
 	# Make a local-only copy of the database cursor object
 	my_db = db
@@ -190,17 +210,18 @@ def check_vid(video):
 	tot_file_count = len(vid_list)
 	file_count = vid_list.index(video) + 1
 	vid_name = video.split("/")[-1]
+	mod_time = os.path.getmtime(video)
+	file_size = os.path.getsize(video)
 	
 	# Fetch all rows with matching path, store the path name and digest for later comparisons
-	db_ok = False
-	while not db_ok:
-		try:
-			my_db.execute("SELECT full_path, digest FROM vic WHERE full_path = \"" + video + "\"")
-			db_ok = True
-		except:
-			print("ERROR SECT 1 IN PID " + str(pid))
-			time.sleep(1)
+	q = "SELECT full_path, digest, digest_time, mod_time, file_size FROM vic WHERE full_path = \"" + video + "\""
+	execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
+
+	run_hash = True
+	if len(vid_data) == 1:
+		if mod_time == vid_data[0][3] and file_size == vid_data[0][4]:
+			run_hash = False
 
 	# If --skip-hash-check was passed, we assume the hash we have on-file in the database is correct if and only if
 	# there is only one hash for that file. If there is only a single hash in the database for that file, we load that
@@ -232,47 +253,28 @@ def check_vid(video):
 	# Check if the video file is in the DB with a different hash (i.e., video file has been updated). Check the stored 
 	# SHA1 digest against the SHA1 digest we just computed. If they don't match (hash has changed), add the file to a
 	# list and delete that row below, then rerun ffmpeg check.
-	rows_to_delete = []
+	deleted_rows, updated_rows = 0, 0
 	for vid in vid_data:
-		if vid[0] == video and vid[1] != digest:
-			rows_to_delete.append(vid[1])
-
-	# Delete DB rows with non-matching hashes
-	for row in rows_to_delete:
-		db_ok = False
-		while not db_ok:
-			try:
-				my_db.execute("DELETE FROM vic WHERE digest = \"" + row + "\"")
-				db_ok = True
-			except:
-				time.sleep(1)
-		db_ok = False
-		while not db_ok:
-			try:
-				vic_db.commit()
-				db_ok = True
-			except:
-				time.sleep(1)
+		if vid[1] != digest:
+			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
+			execute_sql(my_db,q,True)
+			deleted_rows += 1
+		elif mod_time != vid[3] or file_size != vid[4]:
+			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + " WHERE digest = \""\
+				+ digest + "\""
+			execute_sql(my_db,q,True)
+			updated_rows += 1
 
 	# Report on deleted DB row(s)
-	if len(rows_to_delete) == 1:
+	if deleted_rows >= 1 or updated_rows >= 1:
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
-			+ str(tot_file_count) + " ] " + vid_name + " purged " + str(len(rows_to_delete)) + " stale db entry")
-	if len(rows_to_delete) > 1:
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
-			+ str(tot_file_count) + " ] " + vid_name + " purged " + str(len(rows_to_delete)) + " stale db entries")
+			+ str(tot_file_count) + " ] " + vid_name + " deleted " + str(deleted_rows) + ", updated " 
+			+ str(updated_rows))
 
 	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not, 
 	# we need to run ffmpeg and add results of run to database.
-	db_ok = False
-	while not db_ok:
-		try:
-			my_db.execute("SELECT full_path, digest, pass, err_text, collision_videos FROM vic WHERE digest = \"" 
-				+ digest + "\"")
-			db_ok = True
-		except:
-			print("ERROR SECT 2 IN PID " + str(pid))
-			time.sleep(1)
+	q = "SELECT full_path, digest, pass, err_text, collision_videos FROM vic WHERE digest = \"" + digest + "\""
+	execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
 
 	# Check if hash is in the DB with a different video file name
@@ -308,33 +310,9 @@ def check_vid(video):
 			# we just generated. If we haven't, we need to re-write that row with the updated collision entries.
 			if collision_videos != row[1]:
 				new_collisions += 1
-				db_ok = False
-				while not db_ok:
-					try:
-						my_db.execute("DELETE FROM vic WHERE full_path = \"" + row[0] + "\"")
-						db_ok = True
-					except:
-						print("ERROR SECT 3 IN PID " + str(pid))
-						time.sleep(1)
-
-				db_ok = False
-				while not db_ok:
-					try:
-						my_db.execute("INSERT INTO vic VALUES(?,?,?,?,?,?)",
-							(row[0],digest,collision_pass,collision_err_text,collisions,collision_videos))
-						db_ok = True
-					except:
-						print("ERROR SECT 4 IN PID " + str(pid))
-						time.sleep(1)
-
-				db_ok = False
-				while not db_ok:
-					try:
-						vic_db.commit()
-						db_ok = True
-					except:
-						print("ERROR SECT 5 IN PID " + str(pid))
-						time.sleep(1)
+				q = "UPDATE vic SET collisions = " + collisions + ", collision_videos = " + collision_videos \
+					+ " WHERE full_path = \"" + row[0] + "\""
+				execute_sql(my_db,q,True)
 
 		# Report on collisions
 		new_collisions -= 1
