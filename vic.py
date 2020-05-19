@@ -442,7 +442,10 @@ def vic(paths,db_path="vic.db",procs=1,skip_hash=False):
 			CREATE TABLE vic (
 				full_path text,
 				digest text,
-				pass int,
+				digest_time real,
+				mod_time real,
+				file_size int,
+				err int,
 				err_text text,
 				collisions int,
 				collision_videos text
