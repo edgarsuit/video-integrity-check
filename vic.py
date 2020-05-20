@@ -246,6 +246,7 @@ def check_vid(video):
 		try:
 			digest = get_sha1(video)
 			digest_time = time.time()
+			print(digest_time)
 		except:
 			digest = "Error"
 		stop = time.perf_counter()
@@ -263,8 +264,8 @@ def check_vid(video):
 			my_db = execute_sql(my_db,q,True)
 			deleted_rows += 1
 		elif mod_time != vid[3] or file_size != vid[4]:
-			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + " WHERE digest = \""\
-				+ digest + "\""
+			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + ", digest_time = " \
+				+ str(digest_time) + " WHERE digest = \""+ digest + "\""
 			my_db = execute_sql(my_db,q,True)
 			updated_rows += 1
 
