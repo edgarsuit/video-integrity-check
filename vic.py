@@ -94,7 +94,7 @@ overall_start = time.perf_counter()
 vid_list = []
 vic_db = None
 db = None
-skip_hash_check = None
+force_hash_check = None
 stop_hash = False
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as 
@@ -168,7 +168,7 @@ def kill_vic(signum, frame):
 	subprocess.run(shlex.split("stty sane"))
 	sys.exit(0)
 
-def execute_sql(cursor,q,commit=False):
+def execute_sql(cursor,q,commit):
 	global vic_db
 	db_ok = False
 	while not db_ok:
@@ -177,7 +177,6 @@ def execute_sql(cursor,q,commit=False):
 			db_ok = True
 		except:
 			time.sleep(1)
-
 	if commit:
 		db_ok = False
 		while not db_ok:
@@ -186,6 +185,7 @@ def execute_sql(cursor,q,commit=False):
 				db_ok = True
 			except:
 				time.sleep(1)
+	return cursor
 
 # Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for 
 # future reference. All output from ffmpeg is stored in database file along with the file's full path, its SHA1 hash,
@@ -197,11 +197,16 @@ def check_vid(video):
 	global db
 	global args
 
-	pid = psutil.Process(os.getpid())
-
 	# Regex statement to clean up DTS error spam
 	dts_re = re.compile(
 		r"^.*\b(Application provided invalid, non monotonically increasing dts to muxer)\b.*$\n",re.MULTILINE)
+	
+	err_video_re = re.compile(r"(\[h264 @ 0x.+\])|(\[hevc @ 0x.+\])|(\[mpeg4 @ 0x.+\])")
+
+	err_audio_re = re.compile(r"(\[mp3float @ 0x.+\])|(\[aac @ 0x.+\])|(\[ac3 @ 0x.+\])|"
+		+ r"(\[truehd @ 0x.+\])|(\[flac @ 0x.+\])")
+
+	err_container_re = re.compile(r"(\[matroska,webm @ 0x.+\])")
 
 	# Make a local-only copy of the database cursor object
 	my_db = db
@@ -215,19 +220,19 @@ def check_vid(video):
 	
 	# Fetch all rows with matching path, store the path name and digest for later comparisons
 	q = "SELECT full_path, digest, digest_time, mod_time, file_size FROM vic WHERE full_path = \"" + video + "\""
-	execute_sql(my_db,q,False)
+	my_db = execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
 
 	# If --skip-hash-check was passed, we assume the hash we have on-file in the database is correct if and only if
 	# there is only one hash for that file. If there is only a single hash in the database for that file, we load that
 	# hash digest into the digest variable and set a flag to skip the hash computation below.
 	run_hash = True
-	if len(vid_data) == 1:
-		if mod_time == vid_data[0][3] and file_size == vid_data[0][4]:
-			digest = vid_data[0][1]
-			digest_time = vid_data[0][2]
-			run_hash = False
+	if len(vid_data) == 1 and mod_time == vid_data[0][3] and file_size == vid_data[0][4] and mod_time < vid_data[0][2]:
+		digest = vid_data[0][1]
+		digest_time = vid_data[0][2]
+		run_hash = False
 
+	if force_hash_check: run_hash = True
 
 	# Hash computation will be run if 1) --skip-hash-check was NOT passed, or 2) --skip-hash-check was passed but the
 	# video file either has 2+ entries in the database (multiple file versions) or has 0 entries in the database (file
@@ -255,24 +260,24 @@ def check_vid(video):
 	for vid in vid_data:
 		if vid[1] != digest:
 			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
-			execute_sql(my_db,q,True)
+			my_db = execute_sql(my_db,q,True)
 			deleted_rows += 1
 		elif mod_time != vid[3] or file_size != vid[4]:
 			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + " WHERE digest = \""\
 				+ digest + "\""
-			execute_sql(my_db,q,True)
+			my_db = execute_sql(my_db,q,True)
 			updated_rows += 1
 
 	# Report on deleted DB row(s)
 	if deleted_rows >= 1 or updated_rows >= 1:
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
 			+ str(tot_file_count) + " ] " + vid_name + " deleted " + str(deleted_rows) + ", updated " 
-			+ str(updated_rows))
+			+ str(updated_rows) + " DB row(s)")
 
 	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not, 
 	# we need to run ffmpeg and add results of run to database.
 	q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
-	execute_sql(my_db,q,False)
+	my_db = execute_sql(my_db,q,False)
 	vid_data = my_db.fetchall()
 
 	# Check if hash is in the DB with a different video file name
@@ -306,7 +311,7 @@ def check_vid(video):
 				new_collisions += 1
 				q = "UPDATE vic SET collisions = " + collisions + ", collision_videos = " + collision_videos \
 					+ " WHERE full_path = \"" + row[0] + "\""
-				execute_sql(my_db,q,True)
+				my_db = execute_sql(my_db,q,True)
 
 		# Report on collisions
 		new_collisions -= 1
@@ -343,6 +348,10 @@ def check_vid(video):
 			(ffmpeg_output, dts_err_ct) = dts_re.subn("",ffmpeg_output)
 			if dts_err_ct > 0:
 				ffmpeg_output += "Invalid, non monotonically increasing dts * " + str(dts_err_ct)
+	
+		err_video = 1 if err_video_re.search(ffmpeg) is not None else 0
+		err_audio = 1 if err_audio_re.search(ffmpeg) is not None else 0
+		err_container = 1 if err_container_re.search(ffmpeg) is not None else 0
 		
 		# To write DB entries, DB must be locked for a few milliseconds. That locking happens automatically on the 
 		# db.execute call for "INSERT" and "DELETE" operations. Since this is multi-threaded program, the DB can 
@@ -352,9 +361,9 @@ def check_vid(video):
 		# Write all the test data to the database, including full video file path, the SHA1 digest, a boolean
 		# value that indicates if the test passed, and the output of the ffmpeg run (which will only contain
 		# text if we encountered a coding error, otherwise it will be an empty string).
-		q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?)",
-			(video,digest,digest_time,mod_time,file_size,err,ffmpeg_output,collisions,collision_videos))
-		execute_sql(my_db,q,True)
+		q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (video,digest,digest_time,mod_time,file_size,err
+			,err_video,err_audio,err_container,ffmpeg_output,collisions,collision_videos))
+		my_db = execute_sql(my_db,q,True)
 
 		# Output status of check
 		stop = time.perf_counter()
@@ -364,19 +373,19 @@ def check_vid(video):
 	
 	else:
 		# If video is found in database after a hash computation, we can skip it (if hash was skipped, we said so above)
-		if run_hash:
+		if run_hash and updated_rows == 0:
 			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
 				+ str(tot_file_count) + " ] " + vid_name + " found in DB")
 
-def vic(paths,db_path="vic.db",procs=1,skip_hash=False):
+def vic(paths,db_path="vic.db",procs=1,force_hash=False):
 	# Use global versions of vid_list, vic_db, db, and skip_hash_check values
 	global vid_list
 	global vic_db
 	global db
-	global skip_hash_check
+	global force_hash_check
 
 	# skip_hash_check is the global version of this flag, skip_hash is the local version passed from the argument
-	skip_hash_check = skip_hash
+	force_hash_check = force_hash
 	
 	# Walk through all the passed paths and create a list of all the files (with full path)
 	start = time.perf_counter()
@@ -407,6 +416,9 @@ def vic(paths,db_path="vic.db",procs=1,skip_hash=False):
 				mod_time real,
 				file_size int,
 				err int,
+				err_video int,
+				err_audio int,
+				err_container int,
 				err_text text,
 				collisions int,
 				collision_videos text
@@ -414,7 +426,10 @@ def vic(paths,db_path="vic.db",procs=1,skip_hash=False):
 		""")
 		db.execute("CREATE INDEX idx_full_path ON vic(full_path)")
 		db.execute("CREATE INDEX idx_digest ON vic(digest)")
-		db.execute("CREATE INDEX idx_pass ON vic(pass)")
+		db.execute("CREATE INDEX idx_err ON vic(err)")
+		db.execute("CREATE INDEX idx_err_video ON vic(err_video)")
+		db.execute("CREATE INDEX idx_err_audio ON vic(err_audio)")
+		db.execute("CREATE INDEX idx_err_container ON vic(err_container)")
 		db.execute("CREATE INDEX idx_collisions ON vic(collisions)")
 		vic_db.commit()
 	else:
@@ -448,9 +463,6 @@ def vic(paths,db_path="vic.db",procs=1,skip_hash=False):
 		db.execute("DELETE FROM vic WHERE err_text = \"PYTHON ERROR\" OR digest = \"Error\"")
 		vic_db.commit()
 
-	if skip_hash_check:
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking database (skipping hash check)...")
-
 	# All videos can be checked in parallel using concurrent.futures.
 	# Spawn some number of workers as determined by -t flag from arguments.
 	executor = concurrent.futures.ProcessPoolExecutor(max_workers=procs)
@@ -478,9 +490,9 @@ if __name__ == '__main__':
 		+ " in a sqlite3 database file.")
 	parser.add_argument('-d', default="vic.db",help="Database path and filename")
 	parser.add_argument('-p', type=int, default=1,help="Number of worker processes to spawn (default: 1)")
-	parser.add_argument('--skip-hash-check', action="store_true",help="Skip hash check, assume all hashes match")
+	parser.add_argument('--force-hash-check', action="store_true",help="Force hash calculation on all files")
 	parser.add_argument('paths', nargs="+",help="Path(s) to video files to be validated")
 	args = parser.parse_args()
 
 	# Run main function with passed arguments
-	vic(args.paths,args.d,args.p,args.skip_hash_check)
+	vic(args.paths,args.d,args.p,args.force_hash_check)

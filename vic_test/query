@@ -24,7 +24,7 @@ DROP INDEX idx_pass;
 DROP INDEX idx_collisions;
 CREATE INDEX idx_full_path ON vic(full_path);
 CREATE INDEX idx_digest ON vic(digest);
-CREATE INDEX idx_pass ON vic(err);
+CREATE INDEX idx_pass ON vic(pass);
 CREATE INDEX idx_err_video ON vic(err_video);
 CREATE INDEX idx_err_audio ON vic(err_audio);
 CREATE INDEX idx_err_container ON vic(err_container);
@@ -34,21 +34,21 @@ INSERT INTO vic (full_path,digest,digest_time,mod_time,file_size,err,err_video,e
 	SELECT
 		full_path,
 		digest,
-		0 as digest_time,
-		0 as mod_time,
-		0 as file_size,
+		NULL as digest_time,
+		NULL as mod_time,
+		NULL as file_size
 		CASE
 			WHEN pass = 1
 				THEN 0
 			ELSE 1
-		END as err,
+		END err,
 		CASE
 			WHEN err_text 
 				LIKE '%[h264 @ %]%'
 				OR err_text LIKE '%[hevc @ %]%'
 				OR err_text LIKE '%[mpeg4 @ %]%'
 			THEN 1 ELSE 0
-		END as err_video,
+		END err_video,
 		CASE
 			WHEN err_text 
 				LIKE '%[mp3float @ %]%'
@@ -57,15 +57,15 @@ INSERT INTO vic (full_path,digest,digest_time,mod_time,file_size,err,err_video,e
 				OR err_text LIKE '%[truehd @ %]%'
 				OR err_text LIKE '%[flac @ %]%'
 			THEN 1 ELSE 0
-		END as err_audio,
+		END err_audio,
 		CASE
 			WHEN err_text 
 				LIKE '%[matroska,webm @ %]%'
 			THEN 1 ELSE 0
-		END as err_container,
+		END err_container,
 		err_text,
-		0 as collisions,
-		NULL as collision_videos
+		collisions,
+		collision_videos
 	FROM vic_old;
 
 DROP TABLE vic_old;
