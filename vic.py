@@ -4,7 +4,7 @@
 #
 # usage: vic_test.py [-h] [-p P] [--skip-hash-check] paths [paths ...]
 #
-# Check all video files in a folder or set of folders for errors using ffmpeg and stores results in a sqlite3 
+# Check all video files in a folder or set of folders for errors using ffmpeg and stores results in a sqlite3
 # database file.
 #
 # Positional arguments:
@@ -16,14 +16,14 @@
 #  --skip-hash-check  Skip hash check, assume all hashes match
 #
 # Details:
-# Uses ffmpeg to check a set of video files for encoding errors. The results are stored in a sqlite3 database in the 
+# Uses ffmpeg to check a set of video files for encoding errors. The results are stored in a sqlite3 database in the
 # script directory. Video files are hashed with SHA1 so the ffmpeg check can be skipped if a hash match is found. If a
 # non-matching hash is found for a video file in the database (i.e., file content changed but file name is the same),
 # old DB row will be removed and replaced with updated hash and ffmpeg results. The database is also checked for
 # non-existent files before the ffmpeg checks start. The database stores the full path of the video file, the
 # SHA1 digest, a boolean value indicating if the ffmpeg test passed, and the output of the ffmpeg run (which will be
 # empty if the run passed, otherwise it will contain the error output).
-# 
+#
 # vic.py is uses concurrent.futures to implement multi-CPU support. ffmpeg is multi-threaded, so one subprocess can
 # kick of multiple threads and occupy a lot of CPU time (especially with high-resolution video files).
 #
@@ -36,13 +36,13 @@
 # keep up.
 #
 # Copyright 2020 Jason Rose <jason@jro.io>
-# Redistribution and use in source and binary forms, with or without modification, are permitted provided that the 
+# Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 # following conditions are met:
 #
 # 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
 #    disclaimer.
 #
-# 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the 
+# 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
 #    following disclaimer in the documentation and/or other materials provided with the distribution
 #
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
@@ -60,8 +60,8 @@ SQL QUERIES
 SELECT * FROM vic WHERE pass = 0 AND err_text LIKE '%File ended prematurely%' ORDER BY full_path ASC
 
 -- PRIORITY 2
-SELECT * FROM vic 
-WHERE pass = 0 
+SELECT * FROM vic
+WHERE pass = 0
 	AND err_text NOT LIKE '%File ended prematurely%'
 	AND err_text LIKE '%error while decoding MB %'
 ORDER BY full_path ASC
@@ -71,7 +71,6 @@ ORDER BY full_path ASC
 ## PRIORITY 4
 
 ## PRIORITY 5
-
 """
 
 import os
@@ -96,15 +95,17 @@ vic_db = None
 db = None
 force_hash_check = None
 stop_hash = False
+debug = False
+#executor = None
 
-# Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as 
+# Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
 # ##d ##h ##m ##.##s. When we add a new time field (i.e., advance from 59m to 1h 0m), we pad all the smaller units with
 # leading zeros so the output aligns nicely. For example, we would have '8m 34.27s' but when we add an hour to that, we
 # would have '1h 08m 34.27s' so the full string length stays consistent as the minutes and seconds tick up. Seconds are
 # set to always use two decimal places for the same reason.
 def conv_time(start,stop):
 	[d,h,m,s] = [0,0,0,0]
-	m, s = divmod(stop-start, 60)
+	m, s = divmod(stop - start, 60)
 	h, m = divmod(m, 60)
 	d, h = divmod(h, 24)
 	# Format seconds output with two decimal places so it aligns with row above
@@ -132,7 +133,7 @@ def get_sha1(video):
 		while buf != b'' and not stop_hash:
 			buf = video_file.read(blocksize)
 			sha1.update(buf)
-	
+
 	# Return the hexidecimal digest if we didn't bail early
 	if stop_hash:
 		return "Hash computation stopped early"
@@ -143,9 +144,10 @@ def get_sha1(video):
 def kill_vic(signum, frame):
 	# Print status
 	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Subprocess terminating")
-	
+
 	# Raise the stop_hash flag to break the SHA1 hash computation loop(s)
 	global stop_hash
+	#global executor
 	stop_hash = True
 
 	# Start by shutting down the concurrent.futures process pool (otherwise new subprocesses will be started as soon
@@ -154,7 +156,7 @@ def kill_vic(signum, frame):
 		executor.shutdown(wait=False)
 	except:
 		pass
-	
+
 	# Send SIGKILL to any child processes (SIGTERM doesn't kill them for some reason)
 	pid = psutil.Process(os.getpid())
 	try:
@@ -163,7 +165,7 @@ def kill_vic(signum, frame):
 			process.send_signal(signal.SIGKILL)
 	except:
 		pass
-	
+
 	# ffmpeg uses some strange line ending syntax and often leaves the shell broken; run stty sane to fix it
 	subprocess.run(shlex.split("stty sane"))
 	sys.exit(0)
@@ -171,23 +173,33 @@ def kill_vic(signum, frame):
 def execute_sql(cursor,q,commit):
 	global vic_db
 	db_ok = False
-	while not db_ok:
+	max_tries = 20
+	tries = 0
+	while not db_ok and tries < max_tries:
 		try:
-			cursor.execute(q)
+			if isinstance(q,tuple):
+				cursor.execute(*q)
+			else:
+				cursor.execute(q)
 			db_ok = True
 		except:
+			tries+=1
+			print()
 			time.sleep(1)
+			print("sleeping")
 	if commit:
 		db_ok = False
-		while not db_ok:
+		while not db_ok and tries < max_tries:
 			try:
 				vic_db.commit()
 				db_ok = True
 			except:
+				tries+=1
 				time.sleep(1)
+				print("sleeping")
 	return cursor
 
-# Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for 
+# Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for
 # future reference. All output from ffmpeg is stored in database file along with the file's full path, its SHA1 hash,
 # if it passed the ffmpeg test, and the output from that test
 def check_vid(video):
@@ -200,7 +212,7 @@ def check_vid(video):
 	# Regex statement to clean up DTS error spam
 	dts_re = re.compile(
 		r"^.*\b(Application provided invalid, non monotonically increasing dts to muxer)\b.*$\n",re.MULTILINE)
-	
+
 	err_video_re = re.compile(r"(\[h264 @ 0x.+\])|(\[hevc @ 0x.+\])|(\[mpeg4 @ 0x.+\])")
 
 	err_audio_re = re.compile(r"(\[mp3float @ 0x.+\])|(\[aac @ 0x.+\])|(\[ac3 @ 0x.+\])|"
@@ -217,7 +229,7 @@ def check_vid(video):
 	vid_name = video.split("/")[-1]
 	mod_time = os.path.getmtime(video)
 	file_size = os.path.getsize(video)
-	
+
 	# Fetch all rows with matching path, store the path name and digest for later comparisons
 	q = "SELECT full_path, digest, digest_time, mod_time, file_size FROM vic WHERE full_path = \"" + video + "\""
 	my_db = execute_sql(my_db,q,False)
@@ -231,6 +243,18 @@ def check_vid(video):
 		digest = vid_data[0][1]
 		digest_time = vid_data[0][2]
 		run_hash = False
+	elif len(vid_data) != 0 and debug:
+		if len(vid_data) != 1:
+			print(" > " + vid_name + " Hashing, len(vid_data) > 1")
+		if mod_time != vid_data[0][3]:
+			print(" > " + vid_name + " Hashing, mod_time != vid_data[0][3]: " + str(mod_time) + " != "
+				+ str(vid_data[0][3]))
+		if file_size != vid_data[0][4]:
+			print(" > " + vid_name + " Hashing, file_size != vid_data[0][4]: " + str(file_size) + " != "
+				+ str(vid_data[0][4]))
+		if mod_time >= vid_data[0][2]:
+			print(" > " + vid_name + " Hashing, mod_time >= vid_data[0][2]: " + str(mod_time) + " >= "
+				+ str(vid_data[0][2]))
 
 	if force_hash_check: run_hash = True
 
@@ -241,41 +265,43 @@ def check_vid(video):
 		# Hash the video file with get_sha1() and print status
 		start = time.perf_counter()
 		digest_time = None
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 			+ str(tot_file_count) + " ] " + vid_name + " hashing... ")
 		try:
 			digest = get_sha1(video)
 			digest_time = time.time()
-			print(digest_time)
 		except:
 			digest = "Error"
 		stop = time.perf_counter()
 		t = conv_time(start,stop)
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 			+ str(tot_file_count) + " ] " + vid_name + " hashed in " + t + ", checking...")
+	elif (file_count % 100) == 0:
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
+			+ str(tot_file_count) + " ] Files found in DB, skipping hash")
 
-	# Check if the video file is in the DB with a different hash (i.e., video file has been updated). Check the stored 
+	# Check if the video file is in the DB with a different hash (i.e., video file has been updated). Check the stored
 	# SHA1 digest against the SHA1 digest we just computed. If they don't match (hash has changed), add the file to a
 	# list and delete that row below, then rerun ffmpeg check.
 	deleted_rows, updated_rows = 0, 0
 	for vid in vid_data:
-		if vid[1] != digest:
+		if not stop_hash and vid[1] != digest:
 			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
 			my_db = execute_sql(my_db,q,True)
 			deleted_rows += 1
-		elif mod_time != vid[3] or file_size != vid[4]:
+		elif not stop_hash and (digest_time != vid[2] or mod_time != vid[3] or file_size != vid[4]):
 			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + ", digest_time = " \
-				+ str(digest_time) + " WHERE digest = \""+ digest + "\""
+				+ str(digest_time) + " WHERE digest = \"" + digest + "\""
 			my_db = execute_sql(my_db,q,True)
 			updated_rows += 1
 
 	# Report on deleted DB row(s)
 	if deleted_rows >= 1 or updated_rows >= 1:
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
-			+ str(tot_file_count) + " ] " + vid_name + " deleted " + str(deleted_rows) + ", updated " 
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
+			+ str(tot_file_count) + " ] " + vid_name + " deleted " + str(deleted_rows) + ", updated "
 			+ str(updated_rows) + " DB row(s)")
 
-	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not, 
+	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not,
 	# we need to run ffmpeg and add results of run to database.
 	q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
 	my_db = execute_sql(my_db,q,False)
@@ -300,7 +326,7 @@ def check_vid(video):
 
 		# Next we create a space-separated list of all the file names with hash collisions
 		list_of_rows_with_collisions = " ".join([file_name[0] for file_name in rows_with_collisions])
-		
+
 		for row in rows_with_collisions:
 			# For each video, the list of file names should exclude itself and be cleaned of double spaces, trailing
 			# spaces, and leading spaces
@@ -310,27 +336,27 @@ def check_vid(video):
 			# we just generated. If we haven't, we need to re-write that row with the updated collision entries.
 			if collision_videos != row[1]:
 				new_collisions += 1
-				q = "UPDATE vic SET collisions = " + collisions + ", collision_videos = " + collision_videos \
-					+ " WHERE full_path = \"" + row[0] + "\""
+				q = "UPDATE vic SET collisions = " + str(collisions) + ", collision_videos = \"" + collision_videos \
+					+ "\" WHERE full_path = \"" + row[0] + "\""
 				my_db = execute_sql(my_db,q,True)
 
 		# Report on collisions
 		new_collisions -= 1
 		if new_collisions == 1:
-			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
+			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 				+ str(tot_file_count) + " ] " + vid_name + " - " + str(new_collisions) + " new hash collision found")
 		elif new_collisions >= 1:
-			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
+			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 				+ str(tot_file_count) + " ] " + vid_name + " - " + str(new_collisions) + " new hash collisions found")
 	else:
 		# If no collisions were detected, we will store 0, "" in the database for collisions, collision_videos
 		collision_videos = ""
 
 	if vid_data == []:
-		# Run 'ffmpeg -v error -i <video> -f null -' to convert to a null format and report any errors.  
+		# Run 'ffmpeg -v error -i <video> -f null -' to convert to a null format and report any errors.
 		# Use '-max_muxing_queue_size 4096' to prevent buffer underruns.
 		# Outputs with '-v error' flag go to stderr, so they're redirected to stdout with 2>&1.
-		# Output is utf-8 encoded, so needs to be decoded to be usable. 
+		# Output is utf-8 encoded, so needs to be decoded to be usable.
 		# If no errors found, output will be an empty string.
 		start = time.perf_counter()
 		cmd = shlex.split("ffmpeg -v error -i " + shlex.quote(video) + " -max_muxing_queue_size 4096 -f null -")
@@ -339,23 +365,23 @@ def check_vid(video):
 				cmd,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,check=True).stderr.decode("utf-8")
 		except:
 			ffmpeg_output = "PYTHON ERROR"
-		
+
 		# If ffmpeg_output is not empty, we got some coding error and the video did not pass the test
 		err = 1 if ffmpeg_output != "" else 0
 
 		# If there is an ffmpeg error, check if it's a non monotonically increasing dts error and clean up output if it
 		# is. This output can be repeated 10,000+ times on some videos.
-		if not vid_pass:
+		if err:
 			(ffmpeg_output, dts_err_ct) = dts_re.subn("",ffmpeg_output)
 			if dts_err_ct > 0:
 				ffmpeg_output += "Invalid, non monotonically increasing dts * " + str(dts_err_ct)
-	
-		err_video = 1 if err_video_re.search(ffmpeg) is not None else 0
-		err_audio = 1 if err_audio_re.search(ffmpeg) is not None else 0
-		err_container = 1 if err_container_re.search(ffmpeg) is not None else 0
-		
-		# To write DB entries, DB must be locked for a few milliseconds. That locking happens automatically on the 
-		# db.execute call for "INSERT" and "DELETE" operations. Since this is multi-threaded program, the DB can 
+
+		err_video = 1 if err_video_re.search(ffmpeg_output) is not None else 0
+		err_audio = 1 if err_audio_re.search(ffmpeg_output) is not None else 0
+		err_container = 1 if err_container_re.search(ffmpeg_output) is not None else 0
+
+		# To write DB entries, DB must be locked for a few milliseconds. That locking happens automatically on the
+		# db.execute call for "INSERT" and "DELETE" operations. Since this is multi-threaded program, the DB can
 		# occasionally be locked by another process when we attempt to read from it or write to it. If that happens,
 		# we sleep for 1 second and try the operation again. This is used anywhere a db operation occurs in parallel.
 		#
@@ -369,25 +395,26 @@ def check_vid(video):
 		# Output status of check
 		stop = time.perf_counter()
 		t = conv_time(start,stop)
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 			+ str(tot_file_count) + " ] " + vid_name + " checked in " + t)
-	
+
 	else:
 		# If video is found in database after a hash computation, we can skip it (if hash was skipped, we said so above)
 		if run_hash and updated_rows == 0:
-			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / " 
-				+ str(tot_file_count) + " ] " + vid_name + " found in DB")
+			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
+									+ str(tot_file_count) + " ] " + vid_name + " found in DB")
 
-def vic(paths,db_path="vic.db",procs=1,force_hash=False):
+def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 	# Use global versions of vid_list, vic_db, db, and skip_hash_check values
 	global vid_list
 	global vic_db
 	global db
 	global force_hash_check
+	#global executor
 
 	# skip_hash_check is the global version of this flag, skip_hash is the local version passed from the argument
 	force_hash_check = force_hash
-	
+
 	# Walk through all the passed paths and create a list of all the files (with full path)
 	start = time.perf_counter()
 	print("          > Gathering videos... ",end="\r",flush=True)
@@ -439,26 +466,27 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False):
 		db = vic_db.cursor()
 		db.execute("PRAGMA journal_mode = OFF")
 
-		# ...and check DB for stale entries (files that no longer exist on disk) by fetching all full_path entries
-		# from the DB table and checking each one with os.path.isfile(). If it's not a file, add it to a list.
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Cleaning database... ")
-		start = time.perf_counter()
-		rows_to_delete = []
-		db.execute("SELECT full_path FROM vic")
-		vid_data = db.fetchall()
-		for vid in vid_data:
-			if not os.path.isfile(vid[0]):
-				rows_to_delete.append(vid[0])
+		if not skip_db_clean:
+			# ...and check DB for stale entries (files that no longer exist on disk) by fetching all full_path entries
+			# from the DB table and checking each one with os.path.isfile(). If it's not a file, add it to a list.
+			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Cleaning database... ")
+			start = time.perf_counter()
+			rows_to_delete = []
+			db.execute("SELECT full_path FROM vic")
+			vid_data = db.fetchall()
+			for vid in vid_data:
+				if not os.path.isfile(vid[0]):
+					rows_to_delete.append(vid[0])
 
-		# Go through each entry in that list and remove it from the database table.
-		for row in rows_to_delete:
-			db.execute("DELETE FROM vic WHERE full_path = \"" + row + "\"")
-			vic_db.commit()
+			# Go through each entry in that list and remove it from the database table.
+			for row in rows_to_delete:
+				db.execute("DELETE FROM vic WHERE full_path = \"" + row + "\"")
+				vic_db.commit()
 
-		stop = time.perf_counter()
-		t = conv_time(start,stop)
-		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Cleaned " + str(len(rows_to_delete)) 
-			+ " rows in " + t)
+			stop = time.perf_counter()
+			t = conv_time(start,stop)
+			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Cleaned " + str(len(rows_to_delete))
+				+ " rows in " + t)
 
 		# Delete rows with errors so they get reprocessed
 		db.execute("DELETE FROM vic WHERE err_text = \"PYTHON ERROR\" OR digest = \"Error\"")
@@ -491,9 +519,13 @@ if __name__ == '__main__':
 		+ " in a sqlite3 database file.")
 	parser.add_argument('-d', default="vic.db",help="Database path and filename")
 	parser.add_argument('-p', type=int, default=1,help="Number of worker processes to spawn (default: 1)")
+	parser.add_argument('-v', action="store_true",help="Verbose output")
 	parser.add_argument('--force-hash-check', action="store_true",help="Force hash calculation on all files")
+	parser.add_argument('--skip-db-clean', action="store_true",help="Skip the database clean operation")
 	parser.add_argument('paths', nargs="+",help="Path(s) to video files to be validated")
 	args = parser.parse_args()
 
+	debug = args.v
+
 	# Run main function with passed arguments
-	vic(args.paths,args.d,args.p,args.force_hash_check)
+	vic(args.paths,args.d,args.p,args.force_hash_check,args.skip_db_clean)
