@@ -96,7 +96,7 @@ db = None
 force_hash_check = None
 stop_hash = False
 debug = False
-#executor = None
+executor = None
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
 # ##d ##h ##m ##.##s. When we add a new time field (i.e., advance from 59m to 1h 0m), we pad all the smaller units with
@@ -147,7 +147,7 @@ def kill_vic(signum, frame):
 
 	# Raise the stop_hash flag to break the SHA1 hash computation loop(s)
 	global stop_hash
-	#global executor
+	global executor
 	stop_hash = True
 
 	# Start by shutting down the concurrent.futures process pool (otherwise new subprocesses will be started as soon
@@ -410,7 +410,7 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 	global vic_db
 	global db
 	global force_hash_check
-	#global executor
+	global executor
 
 	# skip_hash_check is the global version of this flag, skip_hash is the local version passed from the argument
 	force_hash_check = force_hash
@@ -519,13 +519,10 @@ if __name__ == '__main__':
 		+ " in a sqlite3 database file.")
 	parser.add_argument('-d', default="vic.db",help="Database path and filename")
 	parser.add_argument('-p', type=int, default=1,help="Number of worker processes to spawn (default: 1)")
-	parser.add_argument('-v', action="store_true",help="Verbose output")
 	parser.add_argument('--force-hash-check', action="store_true",help="Force hash calculation on all files")
 	parser.add_argument('--skip-db-clean', action="store_true",help="Skip the database clean operation")
 	parser.add_argument('paths', nargs="+",help="Path(s) to video files to be validated")
 	args = parser.parse_args()
-
-	debug = args.v
 
 	# Run main function with passed arguments
 	vic(args.paths,args.d,args.p,args.force_hash_check,args.skip_db_clean)
