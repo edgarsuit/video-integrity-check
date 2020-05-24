@@ -57,7 +57,9 @@
 SQL QUERIES
 
 -- PRIORITY 1
-SELECT * FROM vic WHERE pass = 0 AND err_text LIKE '%File ended prematurely%' ORDER BY full_path ASC
+SELECT * FROM vic WHERE err_text LIKE '%File ended prematurely%' ORDER BY full_path ASC
+
+SELECT * FROM vic WHERE err_text LIKE '%Invalid data found when processing input%' ORDER BY full_path ASC
 
 -- PRIORITY 2
 SELECT * FROM vic
@@ -95,7 +97,7 @@ vic_db = None
 db = None
 force_hash_check = None
 stop_hash = False
-debug = False
+debug = True
 executor = None
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
@@ -174,7 +176,7 @@ def kill_vic(signum, frame):
 # call for "INSERT" and "DELETE" operations. Since this is multi-threaded program, the DB can occasionally be locked by
 # another process when we attempt to read from it or write to it. If that happens, we sleep for 1 second and try the
 # operation again. up to 20 times This is used anywhere a db operation occurs in parallel.
-def execute_sql(cursor,q,commit):
+def execute_sql(cursor,q):
 	global vic_db
 	db_ok = False
 	max_tries = 20
@@ -193,17 +195,6 @@ def execute_sql(cursor,q,commit):
 			print()
 			time.sleep(1)
 			print("sleeping")
-	# If DB is being updated (INSERT, UPDATE, DELETE operations)
-	if commit:
-		db_ok = False
-		while not db_ok and tries < max_tries:
-			try:
-				vic_db.commit()
-				db_ok = True
-			except:
-				tries+=1
-				time.sleep(1)
-				print("sleeping")
 	return cursor
 
 # Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for
@@ -228,7 +219,7 @@ def check_vid(video):
 
 	# Fetch all rows with matching path, store the path name and digest for later comparisons
 	q = "SELECT full_path, digest, digest_time, mod_time, file_size FROM vic WHERE full_path = \"" + video + "\""
-	my_db = execute_sql(my_db,q,False)
+	my_db = execute_sql(my_db,q)
 	vid_data = my_db.fetchall()
 
 	# We run the hash if and only if:
@@ -288,12 +279,12 @@ def check_vid(video):
 	for vid in vid_data:
 		if not stop_hash and vid[1] != digest:
 			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
-			my_db = execute_sql(my_db,q,True)
+			my_db = execute_sql(my_db,q)
 			deleted_rows += 1
 		elif not stop_hash and (digest_time != vid[2] or mod_time != vid[3] or file_size != vid[4]):
 			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + ", digest_time = " \
-				+ str(digest_time) + " WHERE digest = \"" + digest + "\""
-			my_db = execute_sql(my_db,q,True)
+				+ str(digest_time) + " WHERE full_path = \"" + video + "\" AND digest = \"" + digest + "\""
+			my_db = execute_sql(my_db,q)
 			updated_rows += 1
 
 	# Report on deleted DB row(s)
@@ -305,33 +296,46 @@ def check_vid(video):
 	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not,
 	# we need to run ffmpeg and add results of run to database. Even if the digest we computed matches what we have
 	# in the DB for that video, we run this to check for hash collisions (exact same file with different file names).
-	q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
-	my_db = execute_sql(my_db,q,False)
+	#q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
+	q = "SELECT * FROM vic WHERE digest = \"" + digest + "\""
+	my_db = execute_sql(my_db,q)
 	vid_data = my_db.fetchall()
 
 	# Check if hash is in the DB with a different video file name
 	rows_with_collisions = []
+	video_in_db = False
 	for vid in vid_data:
 		if vid[0] != video and vid[1] == digest:
 			# Save the name of the video and the list of collision videos for that row for later comparison
-			rows_with_collisions.append([vid[0],vid[2]])
+			rows_with_collisions.append([vid[0],vid[11]])
+		if vid[0] == video and vid[1] == digest:
+			video_in_db = True
 
 	# Save the number of collisions found. If it's not zero, we need to do collision processing
 	collisions = len(rows_with_collisions)
 	new_collisions = 0
 	if collisions != 0:
-		# Add the video we're currently checking to the rows list so it gets inserted into the database as well. If
-		# we're at this point, it means this specific file is not in the database but some other file with a matching
-		# hash is. We can assume these are the same files and thus the ffmpeg output for these files will be the same,
-		# so we can add it to the database.
-		rows_with_collisions.append([video,""])
-
-		# Next we create a space-separated list of all the file names with hash collisions
+		# First, we create a space-separated list of all the file names with hash collisions
 		list_of_rows_with_collisions = " ".join([file_name[0] for file_name in rows_with_collisions])
 
+		# Insert the video we're currently checking into the database as well. First, check if this file is in the
+		# database. If it isn't, some other file with a matching hash is. We can assume these are the same files and
+		# thus the ffmpeg output for these files will be the same, so we can add it to the database with that ffmpeg
+		# output. The list of file names should exclude itself and be cleaned of double spaces, trailing spaces, and
+		# leading spaces.
+		if not video_in_db:
+			collision_videos = list_of_rows_with_collisions.replace(video,"").replace("  "," ").strip()
+			new_vid_data = list(vid_data[0])
+			new_vid_data[0] = video
+			new_vid_data[2] = digest_time
+			new_vid_data[10] = collisions
+			new_vid_data[11] = collision_videos
+			q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",tuple(new_vid_data))
+			my_db = execute_sql(my_db,q)
+
 		for row in rows_with_collisions:
-			# For each video, the list of file names should exclude itself and be cleaned of double spaces, trailing
-			# spaces, and leading spaces
+			# As above, for each video, the list of file names should exclude itself and be cleaned of double spaces,
+			# trailing spaces, and leading spaces
 			collision_videos = list_of_rows_with_collisions.replace(row[0],"").replace("  "," ").strip()
 
 			# If we have detected this collision before, the text we pulled from the database will match the string
@@ -340,7 +344,7 @@ def check_vid(video):
 				new_collisions += 1
 				q = "UPDATE vic SET collisions = " + str(collisions) + ", collision_videos = \"" + collision_videos \
 					+ "\" WHERE full_path = \"" + row[0] + "\""
-				my_db = execute_sql(my_db,q,True)
+				my_db = execute_sql(my_db,q)
 
 		# Report on collisions
 		new_collisions -= 1
@@ -399,7 +403,7 @@ def check_vid(video):
 		# will be an empty string), as well as the number of hash collisions detected and colliding files.
 		q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (video,digest,digest_time,mod_time,file_size,err
 			,err_video,err_audio,err_container,ffmpeg_output,collisions,collision_videos))
-		my_db = execute_sql(my_db,q,True)
+		my_db = execute_sql(my_db,q)
 
 		# Output status of check
 		stop = time.perf_counter()
@@ -442,10 +446,11 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 	if not os.path.isfile(db_path):
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Creating database... ")
 		open(db_path, 'w').close()
-		vic_db = sqlite3.connect(db_path, timeout=10)
+		vic_db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
 		db = vic_db.cursor()
-		db.execute("PRAGMA journal_mode = OFF")
+		db.execute("")
 		db.execute("""
+			PRAGMA journal_mode = WAL;
 			CREATE TABLE vic (
 				full_path text,
 				digest text,
@@ -459,21 +464,20 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 				err_text text,
 				collisions int,
 				collision_videos text
-			)
+			);
+			CREATE INDEX idx_full_path ON vic(full_path);
+			CREATE INDEX idx_digest ON vic(digest);
+			CREATE INDEX idx_err ON vic(err);
+			CREATE INDEX idx_err_video ON vic(err_video);
+			CREATE INDEX idx_err_audio ON vic(err_audio);
+			CREATE INDEX idx_err_container ON vic(err_container);
+			CREATE INDEX idx_collisions ON vic(collisions);
 		""")
-		db.execute("CREATE INDEX idx_full_path ON vic(full_path)")
-		db.execute("CREATE INDEX idx_digest ON vic(digest)")
-		db.execute("CREATE INDEX idx_err ON vic(err)")
-		db.execute("CREATE INDEX idx_err_video ON vic(err_video)")
-		db.execute("CREATE INDEX idx_err_audio ON vic(err_audio)")
-		db.execute("CREATE INDEX idx_err_container ON vic(err_container)")
-		db.execute("CREATE INDEX idx_collisions ON vic(collisions)")
-		vic_db.commit()
 	else:
 		# If DB does exist already, connect to it, disable journaling...
-		vic_db = sqlite3.connect(db_path, timeout=10)
+		vic_db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
 		db = vic_db.cursor()
-		db.execute("PRAGMA journal_mode = OFF")
+		db.execute("PRAGMA journal_mode = WAL")
 
 		if not skip_db_clean:
 			# ...and check DB for stale entries (files that no longer exist on disk) by fetching all full_path entries
@@ -503,10 +507,13 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 
 	# All videos can be checked in parallel using concurrent.futures.
 	# Spawn some number of workers as determined by -t flag from arguments.
-	executor = concurrent.futures.ProcessPoolExecutor(max_workers=procs)
-	for video in zip(vid_list,executor.map(check_vid,vid_list)):
+	try:
+		executor = concurrent.futures.ProcessPoolExecutor(max_workers=procs)
+		for video in zip(vid_list,executor.map(check_vid,vid_list)):
+			pass
+		executor.shutdown(wait=True)
+	except OSError:
 		pass
-	executor.shutdown(wait=True)
 
 	# Output final status and execution time
 	overall_stop = time.perf_counter()
