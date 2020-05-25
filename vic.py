@@ -73,6 +73,8 @@ ORDER BY full_path ASC
 ## PRIORITY 4
 
 ## PRIORITY 5
+
+SELECT GROUP_CONCAT(full_path,"|") as f, digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1
 """
 
 import os
@@ -97,7 +99,7 @@ vic_db = None
 db = None
 force_hash_check = None
 stop_hash = False
-debug = True
+debug = False
 executor = None
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
@@ -297,10 +299,11 @@ def check_vid(video):
 	# we need to run ffmpeg and add results of run to database. Even if the digest we computed matches what we have
 	# in the DB for that video, we run this to check for hash collisions (exact same file with different file names).
 	#q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
-	q = "SELECT * FROM vic WHERE digest = \"" + digest + "\""
+	q = "SELECT * FROM vic WHERE digest = \"" + digest + "\" AND full_path = \"" + video + "\""
 	my_db = execute_sql(my_db,q)
 	vid_data = my_db.fetchall()
 
+	"""
 	# Check if hash is in the DB with a different video file name
 	rows_with_collisions = []
 	video_in_db = False
@@ -357,6 +360,7 @@ def check_vid(video):
 	else:
 		# If no collisions were detected, we will store 0, "" in the database for collisions, collision_videos
 		collision_videos = ""
+	"""
 
 	if vid_data == []:
 		# Run 'ffmpeg -v error -i <video> -f null -' to convert to a null format and report any errors.
