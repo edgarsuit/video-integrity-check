@@ -68,12 +68,11 @@ WHERE pass = 0
 	AND err_text LIKE '%error while decoding MB %'
 ORDER BY full_path ASC
 
-## PRIORITY 3
+-- PRIORITY 3
 
-## PRIORITY 4
+-- PRIORITY 4
 
-## PRIORITY 5
-
+-- PRIORITY 5
 SELECT GROUP_CONCAT(full_path,"|") as f, digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1
 """
 
@@ -99,7 +98,7 @@ vic_db = None
 db = None
 force_hash_check = None
 stop_hash = False
-debug = False
+debug = True
 executor = None
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
@@ -152,7 +151,9 @@ def kill_vic(signum, frame):
 	# Raise the stop_hash flag to break the SHA1 hash computation loop(s)
 	global stop_hash
 	global executor
+	global db
 	stop_hash = True
+	db.execute("PRAGMA wal_checkpoint")
 
 	# Start by shutting down the concurrent.futures process pool (otherwise new subprocesses will be started as soon
 	# as the current ones are killed).
@@ -194,10 +195,25 @@ def execute_sql(cursor,q):
 			db_ok = True
 		except:
 			tries+=1
-			print()
 			time.sleep(1)
-			print("sleeping")
 	return cursor
+
+# Find files with the same digest but different file names (hash collisions). The DB rows with these collisions are
+# updated with the number of collisions and a list of the colliding files.
+def find_collisions(db):
+	db.execute("SELECT GROUP_CONCAT(full_path,\"|\") as f, digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1")
+	videos = db.fetchall()
+	len(videos)
+	for vid in videos:
+		full_list_of_collisions = vid[0].split("|")
+		for collision in full_list_of_collisions:
+			list_of_collisions = " ".join(full_list_of_collisions)
+			list_of_collisions = list_of_collisions.replace(collision,"").replace("  "," ").strip()
+			num_collisions = str(len(full_list_of_collisions)-1)
+			db_ok = False
+			db.execute("UPDATE vic SET collisions = " + num_collisions + ", collision_videos = \"" + list_of_collisions
+				+ "\" WHERE full_path = \"" + collision + "\" AND digest = \"" + vid[1] + "\"")
+	return db
 
 # Check video for encoding errors with ffmpeg. This also computes the SHA1 hash of each video file to store in DB for
 # future reference. All output from ffmpeg is stored in database file along with the file's full path, its SHA1 hash,
@@ -232,7 +248,10 @@ def check_vid(video):
 	# If all of those are true, we can skip the hash. If any of them are false, we re-run the hash. If the hash matches,
 	# we correct the values in the database. With the debug flag, we output which of these 4 checks fail.
 	run_hash = True
-	if len(vid_data) == 1 and mod_time == vid_data[0][3] and file_size == vid_data[0][4] and mod_time < vid_data[0][2]:
+	if len(vid_data) == 1 \
+			and round(mod_time,2) == round(vid_data[0][3],2) \
+			and file_size == vid_data[0][4] \
+			and mod_time < vid_data[0][2]:
 		digest = vid_data[0][1]
 		digest_time = vid_data[0][2]
 		run_hash = False
@@ -283,7 +302,12 @@ def check_vid(video):
 			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
 			my_db = execute_sql(my_db,q)
 			deleted_rows += 1
-		elif not stop_hash and (digest_time != vid[2] or mod_time != vid[3] or file_size != vid[4]):
+		elif not stop_hash \
+				and (\
+					round(digest_time,2) != round(vid[2],2) \
+					or round(mod_time,2) != round(vid[3],2) \
+					or file_size != vid[4] \
+				):
 			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + ", digest_time = " \
 				+ str(digest_time) + " WHERE full_path = \"" + video + "\" AND digest = \"" + digest + "\""
 			my_db = execute_sql(my_db,q)
@@ -298,69 +322,9 @@ def check_vid(video):
 	# If hash matches an entry in DB, then we've already done the ffmpeg test on that file and we can skip it. If not,
 	# we need to run ffmpeg and add results of run to database. Even if the digest we computed matches what we have
 	# in the DB for that video, we run this to check for hash collisions (exact same file with different file names).
-	#q = "SELECT full_path, digest, collision_videos FROM vic WHERE digest = \"" + digest + "\""
 	q = "SELECT * FROM vic WHERE digest = \"" + digest + "\" AND full_path = \"" + video + "\""
 	my_db = execute_sql(my_db,q)
 	vid_data = my_db.fetchall()
-
-	"""
-	# Check if hash is in the DB with a different video file name
-	rows_with_collisions = []
-	video_in_db = False
-	for vid in vid_data:
-		if vid[0] != video and vid[1] == digest:
-			# Save the name of the video and the list of collision videos for that row for later comparison
-			rows_with_collisions.append([vid[0],vid[11]])
-		if vid[0] == video and vid[1] == digest:
-			video_in_db = True
-
-	# Save the number of collisions found. If it's not zero, we need to do collision processing
-	collisions = len(rows_with_collisions)
-	new_collisions = 0
-	if collisions != 0:
-		# First, we create a space-separated list of all the file names with hash collisions
-		list_of_rows_with_collisions = " ".join([file_name[0] for file_name in rows_with_collisions])
-
-		# Insert the video we're currently checking into the database as well. First, check if this file is in the
-		# database. If it isn't, some other file with a matching hash is. We can assume these are the same files and
-		# thus the ffmpeg output for these files will be the same, so we can add it to the database with that ffmpeg
-		# output. The list of file names should exclude itself and be cleaned of double spaces, trailing spaces, and
-		# leading spaces.
-		if not video_in_db:
-			collision_videos = list_of_rows_with_collisions.replace(video,"").replace("  "," ").strip()
-			new_vid_data = list(vid_data[0])
-			new_vid_data[0] = video
-			new_vid_data[2] = digest_time
-			new_vid_data[10] = collisions
-			new_vid_data[11] = collision_videos
-			q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",tuple(new_vid_data))
-			my_db = execute_sql(my_db,q)
-
-		for row in rows_with_collisions:
-			# As above, for each video, the list of file names should exclude itself and be cleaned of double spaces,
-			# trailing spaces, and leading spaces
-			collision_videos = list_of_rows_with_collisions.replace(row[0],"").replace("  "," ").strip()
-
-			# If we have detected this collision before, the text we pulled from the database will match the string
-			# we just generated. If we haven't, we need to re-write that row with the updated collision entries.
-			if collision_videos != row[1]:
-				new_collisions += 1
-				q = "UPDATE vic SET collisions = " + str(collisions) + ", collision_videos = \"" + collision_videos \
-					+ "\" WHERE full_path = \"" + row[0] + "\""
-				my_db = execute_sql(my_db,q)
-
-		# Report on collisions
-		new_collisions -= 1
-		if new_collisions == 1:
-			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
-				+ str(tot_file_count) + " ] " + vid_name + " - " + str(new_collisions) + " new hash collision found")
-		elif new_collisions >= 1:
-			print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
-				+ str(tot_file_count) + " ] " + vid_name + " - " + str(new_collisions) + " new hash collisions found")
-	else:
-		# If no collisions were detected, we will store 0, "" in the database for collisions, collision_videos
-		collision_videos = ""
-	"""
 
 	if vid_data == []:
 		# Run 'ffmpeg -v error -i <video> -f null -' to convert to a null format and report any errors.
@@ -371,8 +335,7 @@ def check_vid(video):
 		start = time.perf_counter()
 		cmd = shlex.split("ffmpeg -v error -i " + shlex.quote(video) + " -max_muxing_queue_size 4096 -f null -")
 		try:
-			ffmpeg_output = subprocess.run(
-				cmd,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,check=True).stderr.decode("utf-8")
+			ffmpeg_output = subprocess.run(cmd,stderr=subprocess.PIPE,check=True).stderr.decode("utf-8")
 		except:
 			ffmpeg_output = "PYTHON ERROR"
 
@@ -406,7 +369,7 @@ def check_vid(video):
 		#  the output of the ffmpeg run (which will only contain text if we encountered a coding error, otherwise it
 		# will be an empty string), as well as the number of hash collisions detected and colliding files.
 		q = ("INSERT INTO vic VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (video,digest,digest_time,mod_time,file_size,err
-			,err_video,err_audio,err_container,ffmpeg_output,collisions,collision_videos))
+			,err_video,err_audio,err_container,ffmpeg_output,0,""))
 		my_db = execute_sql(my_db,q)
 
 		# Output status of check
@@ -509,6 +472,10 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 		db.execute("DELETE FROM vic WHERE err_text = \"PYTHON ERROR\" OR digest = \"Error\"")
 		vic_db.commit()
 
+	# Check for hash collisions before run
+	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
+	db = find_collisions(db)
+
 	# All videos can be checked in parallel using concurrent.futures.
 	# Spawn some number of workers as determined by -t flag from arguments.
 	try:
@@ -519,12 +486,19 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 	except OSError:
 		pass
 
+	# Check for hash collisions after run
+	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
+	db = find_collisions(db)
+
+	# Checkpoint and close DB, reset terminal
+	db.execute("PRAGMA wal_checkpoint")
+	vic_db.close()
+	subprocess.run(shlex.split("stty sane"))
+
 	# Output final status and execution time
 	overall_stop = time.perf_counter()
 	t = conv_time(overall_start,overall_stop)
 	print("  > Finished in " + t)
-	vic_db.close()
-	subprocess.run(shlex.split("stty sane"))
 
 if __name__ == '__main__':
 	# SIGINT and SIGTERM handlers
