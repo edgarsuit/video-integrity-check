@@ -35,6 +35,7 @@
 # 4096 to support larger video files (4K+), otherwise ffmpeg will error out because the frame buffer won't be able to
 # keep up.
 #
+#
 # Copyright 2020 Jason Rose <jason@jro.io>
 # Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 # following conditions are met:
@@ -56,24 +57,12 @@
 """
 SQL QUERIES
 
--- PRIORITY 1
 SELECT * FROM vic WHERE err_text LIKE '%File ended prematurely%' ORDER BY full_path ASC
 
-SELECT * FROM vic WHERE err_text LIKE '%Invalid data found when processing input%' ORDER BY full_path ASC
+SELECT * FROM vic WHERE err_text LIKE '%Error while decoding stream #0:0%' ORDER BY full_path ASC
 
--- PRIORITY 2
-SELECT * FROM vic
-WHERE pass = 0
-	AND err_text NOT LIKE '%File ended prematurely%'
-	AND err_text LIKE '%error while decoding MB %'
-ORDER BY full_path ASC
+SELECT full_path, collisions, collision_videos FROM vic WHERE collisions != 0 ORDER BY full_path ASC
 
--- PRIORITY 3
-
--- PRIORITY 4
-
--- PRIORITY 5
-SELECT GROUP_CONCAT(full_path,"|") as f, digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1
 """
 
 import os
@@ -98,7 +87,7 @@ vic_db = None
 db = None
 force_hash_check = None
 stop_hash = False
-debug = True
+debug = False
 executor = None
 
 # Take a start and a stop time from time.perf_counter and convert them to a string that describes elapsed time as
@@ -201,14 +190,18 @@ def execute_sql(cursor,q):
 # Find files with the same digest but different file names (hash collisions). The DB rows with these collisions are
 # updated with the number of collisions and a list of the colliding files.
 def find_collisions(db):
-	db.execute("SELECT GROUP_CONCAT(full_path,\"|\") as f, digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1")
+	# Clear all collision data first (it all gets recalculated anyway)
+	db.execute("UPDATE vic SET collisions = 0, collision_videos = \"\" WHERE collisions != 0")
+
+	# Find rows with duplicate hash values, group full_path value by concatinating with the | symbol. Update each row
+	db.execute("SELECT GROUP_CONCAT(full_path,\"|\"), digest, COUNT(*) c FROM vic GROUP BY digest HAVING c > 1")
 	videos = db.fetchall()
 	len(videos)
 	for vid in videos:
 		full_list_of_collisions = vid[0].split("|")
 		for collision in full_list_of_collisions:
-			list_of_collisions = " ".join(full_list_of_collisions)
-			list_of_collisions = list_of_collisions.replace(collision,"").replace("  "," ").strip()
+			list_of_collisions = "|".join(full_list_of_collisions)
+			list_of_collisions = list_of_collisions.replace(collision,"").replace("||","|").strip("|")
 			num_collisions = str(len(full_list_of_collisions)-1)
 			db_ok = False
 			db.execute("UPDATE vic SET collisions = " + num_collisions + ", collision_videos = \"" + list_of_collisions
@@ -287,7 +280,7 @@ def check_vid(video):
 		t = conv_time(start,stop)
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 			+ str(tot_file_count) + " ] " + vid_name + " hashed in " + t + ", checking...")
-	elif (file_count % 100) == 0:
+	elif (file_count % 100) == 0 or file_count == tot_file_count:
 		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > [ " + str(file_count) + " / "
 			+ str(tot_file_count) + " ] Files found in DB, skipping hash")
 
@@ -353,9 +346,11 @@ def check_vid(video):
 				ffmpeg_output += "Invalid, non monotonically increasing dts * " + str(dts_err_ct)
 
 		# Regex statements to detect error types
-		err_video_re = re.compile(r"(\[h264 @ 0x.+\])|(\[hevc @ 0x.+\])|(\[mpeg4 @ 0x.+\])")
-		err_audio_re = re.compile(r"(\[mp3float @ 0x.+\])|(\[aac @ 0x.+\])|(\[ac3 @ 0x.+\])|"
-			+ r"(\[truehd @ 0x.+\])|(\[flac @ 0x.+\])")
+		err_video_re = re.compile(r"(\[h264 @ 0x.+\])|(\[hevc @ 0x.+\])|(\[mpeg4 @ 0x.+\])|(\[msmpeg4 @ 0x.+\])"
+			+ r"|(\[wmv2 @ 0x.+\])")
+		err_audio_re = re.compile(r"(\[mp3float @ 0x.+\])|(\[aac @ 0x.+\])|(\[ac3 @ 0x.+\])|(\[truehd @ 0x.+\])"
+			+ r"|(\[flac @ 0x.+\])|(\[dca @ 0x.+\])|(\[mp2 @ 0x.+\])|(\[eac3 @ 0x.+\])|(Invalid, non monotonically"
+			+ r" increasing dts)")
 		err_container_re = re.compile(r"(\[matroska,webm @ 0x.+\])")
 
 		# Detect labels for error types in ffmpeg message
@@ -454,14 +449,18 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 			rows_to_delete = []
 			db.execute("SELECT full_path FROM vic")
 			vid_data = db.fetchall()
+			directory = ""
 			for vid in vid_data:
-				if not os.path.isfile(vid[0]):
+				old_dir = directory
+				directory, filename = os.path.split(vid[0])
+				if directory != old_dir:
+					dir_list = os.listdir(directory)
+				if filename not in dir_list:
 					rows_to_delete.append(vid[0])
 
 			# Go through each entry in that list and remove it from the database table.
 			for row in rows_to_delete:
 				db.execute("DELETE FROM vic WHERE full_path = \"" + row + "\"")
-				vic_db.commit()
 
 			stop = time.perf_counter()
 			t = conv_time(start,stop)
@@ -470,7 +469,6 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 
 		# Delete rows with errors so they get reprocessed
 		db.execute("DELETE FROM vic WHERE err_text = \"PYTHON ERROR\" OR digest = \"Error\"")
-		vic_db.commit()
 
 	# Check for hash collisions before run
 	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
