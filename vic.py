@@ -61,7 +61,11 @@ SELECT * FROM vic WHERE err_text LIKE '%File ended prematurely%' ORDER BY full_p
 
 SELECT * FROM vic WHERE err_text LIKE '%Error while decoding stream #0:0%' ORDER BY full_path ASC
 
+SELECT * FROM vic WHERE err_text LIKE '%[h264 @ %] error while decoding MB %' ORDER BY full_path ASC
+
 SELECT full_path, collisions, collision_videos FROM vic WHERE collisions != 0 ORDER BY full_path ASC
+
+SELECT * FROM vic WHERE full_path LIKE '/media/delsca/%' AND collisions = 0 ORDER BY full_path ASC
 
 """
 
@@ -77,6 +81,7 @@ import sqlite3
 import argparse
 import concurrent.futures
 import psutil
+from shutil import copyfile
 
 # Track total execution time
 overall_start = time.perf_counter()
@@ -225,7 +230,7 @@ def check_vid(video):
 	tot_file_count = len(vid_list)
 	file_count = vid_list.index(video) + 1
 	vid_name = video.split("/")[-1]
-	mod_time = os.path.getmtime(video)
+	mod_time = str(os.path.getmtime(video))
 	file_size = os.path.getsize(video)
 
 	# Fetch all rows with matching path, store the path name and digest for later comparisons
@@ -242,9 +247,9 @@ def check_vid(video):
 	# we correct the values in the database. With the debug flag, we output which of these 4 checks fail.
 	run_hash = True
 	if len(vid_data) == 1 \
-			and round(mod_time,2) == round(vid_data[0][3],2) \
+			and mod_time == vid_data[0][3] \
 			and file_size == vid_data[0][4] \
-			and mod_time < vid_data[0][2]:
+			and float(mod_time) < float(vid_data[0][2]):
 		digest = vid_data[0][1]
 		digest_time = vid_data[0][2]
 		run_hash = False
@@ -252,14 +257,12 @@ def check_vid(video):
 		if len(vid_data) != 1:
 			print(" > " + vid_name + " Hashing, len(vid_data) > 1")
 		if mod_time != vid_data[0][3]:
-			print(" > " + vid_name + " Hashing, mod_time != vid_data[0][3]: " + str(mod_time) + " != "
-				+ str(vid_data[0][3]))
+			print(" > " + vid_name + " Hashing, mod_time != vid_data[0][3]: " + mod_time + " != " + vid_data[0][3])
 		if file_size != vid_data[0][4]:
 			print(" > " + vid_name + " Hashing, file_size != vid_data[0][4]: " + str(file_size) + " != "
 				+ str(vid_data[0][4]))
 		if mod_time >= vid_data[0][2]:
-			print(" > " + vid_name + " Hashing, mod_time >= vid_data[0][2]: " + str(mod_time) + " >= "
-				+ str(vid_data[0][2]))
+			print(" > " + vid_name + " Hashing, mod_time >= vid_data[0][2]: " + mod_time + " >= " + vid_data[0][2])
 
 	# If force_hash_check flag is raised, we over-write whatever we determined above and run the hash anyway
 	if force_hash_check: run_hash = True
@@ -273,7 +276,7 @@ def check_vid(video):
 		try:
 			# Run the hash function and store the UNIX time that the hash completed
 			digest = get_sha1(video)
-			digest_time = time.time()
+			digest_time = str(time.time())
 		except:
 			digest = "Error"
 		stop = time.perf_counter()
@@ -295,14 +298,9 @@ def check_vid(video):
 			q = "DELETE FROM vic WHERE digest = \"" + vid[1] + "\""
 			my_db = execute_sql(my_db,q)
 			deleted_rows += 1
-		elif not stop_hash \
-				and (\
-					round(digest_time,2) != round(vid[2],2) \
-					or round(mod_time,2) != round(vid[3],2) \
-					or file_size != vid[4] \
-				):
-			q = "UPDATE vic SET mod_time = " + str(mod_time) + ", file_size = " + str(file_size) + ", digest_time = " \
-				+ str(digest_time) + " WHERE full_path = \"" + video + "\" AND digest = \"" + digest + "\""
+		elif not stop_hash and (digest_time != vid[2] or mod_time != vid[3] or file_size != vid[4]):
+			q = "UPDATE vic SET mod_time = " + mod_time + ", file_size = " + str(file_size) + ", digest_time = " \
+				+ digest_time + " WHERE full_path = \"" + video + "\" AND digest = \"" + digest + "\""
 			my_db = execute_sql(my_db,q)
 			updated_rows += 1
 
@@ -326,7 +324,8 @@ def check_vid(video):
 		# Output is utf-8 encoded, so needs to be decoded to be usable.
 		# If no errors found, output will be an empty string.
 		start = time.perf_counter()
-		cmd = shlex.split("ffmpeg -v error -i " + shlex.quote(video) + " -max_muxing_queue_size 4096 -f null -")
+		cmd_raw = "ffmpeg -v repeat+level+error -i " + shlex.quote(video) + " -max_muxing_queue_size 4096 -f null -"
+		cmd = shlex.split(cmd_raw)
 		try:
 			ffmpeg_output = subprocess.run(cmd,stderr=subprocess.PIPE,check=True).stderr.decode("utf-8")
 		except:
@@ -410,14 +409,13 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 		open(db_path, 'w').close()
 		vic_db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
 		db = vic_db.cursor()
-		db.execute("")
+		db.execute("PRAGMA journal_mode = WAL;")
 		db.execute("""
-			PRAGMA journal_mode = WAL;
 			CREATE TABLE vic (
 				full_path text,
 				digest text,
-				digest_time real,
-				mod_time real,
+				digest_time text,
+				mod_time text,
 				file_size int,
 				err int,
 				err_video int,
@@ -427,14 +425,14 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 				collisions int,
 				collision_videos text
 			);
-			CREATE INDEX idx_full_path ON vic(full_path);
-			CREATE INDEX idx_digest ON vic(digest);
-			CREATE INDEX idx_err ON vic(err);
-			CREATE INDEX idx_err_video ON vic(err_video);
-			CREATE INDEX idx_err_audio ON vic(err_audio);
-			CREATE INDEX idx_err_container ON vic(err_container);
-			CREATE INDEX idx_collisions ON vic(collisions);
 		""")
+		db.execute("CREATE INDEX idx_full_path ON vic(full_path);")
+		db.execute("CREATE INDEX idx_digest ON vic(digest);")
+		db.execute("CREATE INDEX idx_err ON vic(err);")
+		db.execute("CREATE INDEX idx_err_video ON vic(err_video);")
+		db.execute("CREATE INDEX idx_err_audio ON vic(err_audio);")
+		db.execute("CREATE INDEX idx_err_container ON vic(err_container);")
+		db.execute("CREATE INDEX idx_collisions ON vic(collisions);")
 	else:
 		# If DB does exist already, connect to it, disable journaling...
 		vic_db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
@@ -454,7 +452,10 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 				old_dir = directory
 				directory, filename = os.path.split(vid[0])
 				if directory != old_dir:
-					dir_list = os.listdir(directory)
+					try:
+						dir_list = os.listdir(directory)
+					except FileNotFoundError:
+						dir_list = []
 				if filename not in dir_list:
 					rows_to_delete.append(vid[0])
 
@@ -470,9 +471,9 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 		# Delete rows with errors so they get reprocessed
 		db.execute("DELETE FROM vic WHERE err_text = \"PYTHON ERROR\" OR digest = \"Error\"")
 
-	# Check for hash collisions before run
-	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
-	db = find_collisions(db)
+		# Check for hash collisions before run
+		print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
+		db = find_collisions(db)
 
 	# All videos can be checked in parallel using concurrent.futures.
 	# Spawn some number of workers as determined by -t flag from arguments.
@@ -488,9 +489,12 @@ def vic(paths,db_path="vic.db",procs=1,force_hash=False,skip_db_clean=False):
 	print("  @ " + conv_time(overall_start,time.perf_counter()) + " > Checking for hash collisions")
 	db = find_collisions(db)
 
-	# Checkpoint and close DB, reset terminal
+	# Checkpoint and close DB
 	db.execute("PRAGMA wal_checkpoint")
 	vic_db.close()
+	# Make a working copy of the database
+	copyfile(db_path,db_path.replace("vic.db","vic_work.db"))
+	# Reset terminal
 	subprocess.run(shlex.split("stty sane"))
 
 	# Output final status and execution time
