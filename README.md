@@ -43,7 +43,8 @@ The ffmpeg call uses the following syntax:
 This "converts" the video using a null format and dumps the output to /dev/null. The max_muxing_queue_size is set to 4096 to support larger video files (4K+), otherwise ffmpeg will error out because the frame buffer won't be able to keep up.
 
 ## Copyright Information
-Copyright 2020 jason@jro.io
+Copyright 2020
+
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
 
  1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
