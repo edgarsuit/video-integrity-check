@@ -1,42 +1,56 @@
 #!/usr/bin/python3
 #
-# vic.py
+# Video Integrity Check
+# Batch video integrity file check using ffmpeg. Check all video files in a folder or set of folders for errors using
+# ffmpeg and stores results in a sqlite database file.
 #
-# usage: vic_test.py [-h] [-p P] [--skip-hash-check] paths [paths ...]
-#
-# Check all video files in a folder or set of folders for errors using ffmpeg and stores results in a sqlite3
-# database file.
+# Usage
+# vic_test.py [-h] [-d D] [-p P] [--force-hash-check] [--skip-db-clean] paths [paths ...]
 #
 # Positional arguments:
-#  paths              Path(s) to video files to be validated
+# paths               Path(s) to video files to be validated
 #
 # Optional arguments:
-#  -h, --help         show this help message and exit
-#  -p P               Number of worker processes to spawn (default: 1)
-#  --skip-hash-check  Skip hash check, assume all hashes match
+# -h, --help          Show this help message and exit
+# -d D                Database path and filename (default: "./vic.db")
+# -p P                Number of worker processes to spawn (default: 1)
+# --force-hash-check  Force hash calculation on all files
+# --skip-db-clean     Skip the database clean operation
 #
-# Details:
-# Uses ffmpeg to check a set of video files for encoding errors. The results are stored in a sqlite3 database in the
-# script directory. Video files are hashed with SHA1 so the ffmpeg check can be skipped if a hash match is found. If a
-# non-matching hash is found for a video file in the database (i.e., file content changed but file name is the same),
-# old DB row will be removed and replaced with updated hash and ffmpeg results. The database is also checked for
-# non-existent files before the ffmpeg checks start. The database stores the full path of the video file, the
-# SHA1 digest, a boolean value indicating if the ffmpeg test passed, and the output of the ffmpeg run (which will be
-# empty if the run passed, otherwise it will contain the error output).
+# Details
+# VIC uses ffmpeg to check a set of video files for encoding errors. The results are stored in a sqlite database. Video
+# files are stored with file size, modification time, and hashed with SHA1 so the ffmpeg check can be skipped if a file
+# match is found. If a non-matching file is found for a video file in the database (i.e., file content changed but file
+# name is the same), the old DB row will be updated with updated hash and ffmpeg results. The database is also checked
+# for non-existent files and hash collisions.
+#
+# The database stores the following information on each video file:
+#
+# - Full path to the video file
+# - SHA1 digest of the video file
+# - The UNIX timestamp of when that digest was calculated
+# - The file's modification time
+# - The size (in bytes) of the file
+# - A boolean value indicating if there is are any errors in the file
+# - A boolean value indicating if there is are video errors in the file
+# - A boolean value indicating if there is are audio errors in the file
+# - A boolean value indicating if there is are container errors in the file
+# - The full text output from the ffmpeg call
+# - The number of files in the database with matching hashes
+# - A list of files with matching hashes (seperated by a pipe | symbol)
 #
 # vic.py is uses concurrent.futures to implement multi-CPU support. ffmpeg is multi-threaded, so one subprocess can
 # kick of multiple threads and occupy a lot of CPU time (especially with high-resolution video files).
 #
 # The ffmpeg call uses the following syntax:
 #
-# 	ffmpeg -v error -i <video> -max_muxing_queue_size 4096 -f null -
+# ffmpeg -v repeat+level+warning -i <video> -max_muxing_queue_size 4096 -f null -
 #
 # This "converts" the video using a null format and dumps the output to /dev/null. The max_muxing_queue_size is set to
 # 4096 to support larger video files (4K+), otherwise ffmpeg will error out because the frame buffer won't be able to
 # keep up.
 #
-#
-# Copyright 2020 Jason Rose <jason@jro.io>
+# Copyright 2020
 # Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
 # following conditions are met:
 #
@@ -55,7 +69,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 """
-SQL QUERIES
+HELPFUL SQL QUERIES
 
 SELECT * FROM vic WHERE err_text LIKE '%File ended prematurely%' ORDER BY full_path ASC
 
@@ -66,6 +80,8 @@ SELECT * FROM vic WHERE err_text LIKE '%[h264 @ %] error while decoding MB %' OR
 SELECT full_path, collisions, collision_videos FROM vic WHERE collisions != 0 ORDER BY full_path ASC
 
 SELECT * FROM vic WHERE full_path LIKE '/media/delsca/%' AND collisions = 0 ORDER BY full_path ASC
+
+SELECT full_path,err_text FROM vic WHERE err_text LIKE "%[warning] %: corrupt decoded frame in stream 0%" ORDER BY full_path ASC
 
 """
 
