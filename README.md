@@ -34,7 +34,7 @@ The database stores the following information on each video file:
  - The number of files in the database with matching hashes
  - A list of files with matching hashes (seperated by a pipe | symbol)
 
-vic.py is uses concurrent.futures to implement multi-CPU support. ffmpeg is multi-threaded, so one subprocess can kick of multiple threads and occupy a lot of CPU time (especially with high-resolution video files).
+VIC is uses `concurrent.futures` to implement multi-CPU support. ffmpeg is multi-threaded, so one subprocess can kick of multiple threads and occupy a lot of CPU time (especially with high-resolution video files).
 
 The ffmpeg call uses the following syntax:
 
