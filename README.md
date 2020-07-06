@@ -26,6 +26,7 @@ The database stores the following information on each video file:
  - The UNIX timestamp of when that digest was calculated
  - The file's modification time
  - The size (in bytes) of the file
+ - A boolean value indicating if there is are any warnings in the file
  - A boolean value indicating if there is are any errors in the file
  - A boolean value indicating if there is are video errors in the file
  - A boolean value indicating if there is are audio errors in the file
