@@ -35,6 +35,8 @@ The database stores the following information on each video file:
  - The number of files in the database with matching hashes
  - A list of files with matching hashes (seperated by a pipe | symbol)
 
+VIC will ignore files with extensions that might commonly coexist with video files (.nfo, .txt, .srt, etc). Any invalid files not included in this list will be entered into the database with the error text "ffmpeg error". Database rows with this error text will be automatically removed from the database when VIC is re-run so it can attempt to process them again.
+
 VIC is uses `concurrent.futures` to implement multi-CPU support. ffmpeg is multi-threaded, so one subprocess can kick of multiple threads and occupy a lot of CPU time (especially with high-resolution video files).
 
 The ffmpeg call uses the following syntax:
